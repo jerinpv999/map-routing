@@ -1,0 +1,913 @@
+openapi: 3.0.3
+info:
+  title: Delivery Routing API
+  version: 1.5.0
+  description: |
+    Self-hosted routing and live tracking for instant delivery orders
+    (rider → pickup → customer), built on OSRM and PostGIS.
+
+    **Typical flow for one order**
+
+    1. `POST /api/order-route` with an `order_id` when the order is confirmed (plans the route, enables tracking)
+    2. `POST /api/orders/{order_id}/location` from the rider app every 5–10 s
+    3. `POST /api/orders/{order_id}/pickup` when the rider collects the parcel
+    4. `POST /api/orders/{order_id}/deliver` when the rider hands it over
+
+    **Pages (served by dr-web, not part of this API):**
+    `/track.html?order={order_id}` map-only live tracking for customers (add `&eta=1` for an ETA card) ·
+    `/picker.js` drop-in address pin picker with address suggestions · `/picker.html` full-screen picker for app WebViews ·
+    `/?order={order_id}&live=1&embed=1` live map with ETA card.
+
+    **WebSocket (not describable in OpenAPI):** `ws(s)://HOST/api/orders/{order_id}/ws` pushes the same
+    object as `GET /api/orders/{order_id}/live` whenever the order changes, plus `{"type":"ping"}` every 25 s.
+
+    **Coordinates:** request bodies use `{lat, lng}`. GeoJSON and `snapped` values are `[lng, lat]` (GeoJSON order).
+
+    **Errors:** checks raised by the API return `{"detail": "message"}`. Malformed request bodies return
+    `422` with `{"detail": [ ...field errors... ]}`.
+  contact:
+    name: Delivery Routing
+servers:
+  - url: http://localhost:8088
+    description: Through the dr-web nginx (map page + API)
+  - url: http://localhost:8001
+    description: API container directly (server-to-server)
+  - url: "{scheme}://{host}"
+    description: Your server
+    variables:
+      scheme:
+        default: https
+        enum: [https, http]
+      host:
+        default: maps.example.com
+
+tags:
+  - name: Address search
+    description: Suggestions while the customer types, and the address at a pin (built from your .osm.pbf files)
+  - name: Planning
+    description: Route an order before the ride starts
+  - name: Live tracking
+    description: Rider location updates and live state
+  - name: Completion
+    description: Pickup and delivery confirmation by order ID + rider ID
+  - name: Riders
+  - name: Admin
+    description: Ops / support only. Do not expose to rider apps.
+  - name: System
+
+paths:
+  /api/health:
+    get:
+      tags: [System]
+      summary: Health of the routing engine and database
+      operationId: health
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok, osrm: true, db: true }
+
+  /api/geocode/search:
+    get:
+      tags: [Address search]
+      summary: Address suggestions (typeahead)
+      description: |
+        Areas, streets, landmarks and house addresses matching what the customer typed. Typo-tolerant
+        ("edapally" finds Edappally); results near `lat`/`lng` rank higher. Returns `[]` for fewer
+        than 2 characters. `503` until `./scripts/setup.sh` has built the search data.
+      operationId: geocodeSearch
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 200 }, example: lulu mall }
+        - { name: lat, in: query, schema: { type: number, minimum: -90, maximum: 90 }, description: Prefer results near this point, example: 10.0 }
+        - { name: lng, in: query, schema: { type: number, minimum: -180, maximum: 180 }, example: 76.3 }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 8 } }
+        - name: kinds
+          in: query
+          description: Comma list to restrict results
+          schema: { type: string, example: "place,poi" }
+      responses:
+        "200":
+          description: Suggestions, best first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Suggestion" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503":
+          description: Search data not built yet, or database unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { detail: Address search data is not built yet. Run ./scripts/setup.sh }
+
+  /api/geocode/reverse:
+    get:
+      tags: [Address search]
+      summary: Address at a point (what is at this pin)
+      operationId: geocodeReverse
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 }, example: 10.0266 }
+        - { name: lng, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 }, example: 76.3092 }
+      responses:
+        "200":
+          description: Nearby landmark (within 100 m), road (80 m), locality, city, district, state, PIN code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReverseResponse" }
+              example:
+                display: Near LuLu International Shopping Mall, Edappally, Kochi
+                landmark: { name: LuLu International Shopping Mall, category: shop=mall, distance_m: 75.3 }
+                address: { house_number: null, road: null, locality: Edappally, city: Kochi, district: Ernakulam, state: Kerala, postcode: "682024" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503":
+          description: Search data not built yet, or database unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/geocode/labels:
+    get:
+      tags: [Address search]
+      summary: House names / numbers and named buildings in a map view (GeoJSON)
+      description: |
+        Used by the map pages to label houses when zoomed in (street level). Shops and landmarks are
+        labelled from the map tiles; this adds what the tiles don't carry. Views larger than about
+        3 x 3 km return an empty collection. Max 1500 points.
+      operationId: geocodeLabels
+      parameters:
+        - { name: bbox, in: query, required: true, schema: { type: string }, example: "76.305,10.022,76.315,10.030",
+            description: "minLng,minLat,maxLng,maxLat" }
+      responses:
+        "200":
+          description: GeoJSON points with `label` and `kind` (house | building)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type: { type: string, enum: [FeatureCollection] }
+                  features:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string, enum: [Feature] }
+                        geometry: { $ref: "#/components/schemas/GeoJSONPoint" }
+                        properties:
+                          type: object
+                          properties:
+                            label: { type: string }
+                            kind: { type: string, enum: [house, building] }
+              example:
+                type: FeatureCollection
+                features:
+                  - { type: Feature, geometry: { type: Point, coordinates: [76.30966, 10.0255] }, properties: { label: Rose Villa, kind: house } }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/geocode/stats:
+    get:
+      tags: [Address search]
+      summary: How much address search data is loaded
+      description: Counts by type, to check what your .osm.pbf files contain (e.g. how many houses have a name or number).
+      operationId: geocodeStats
+      responses:
+        "200":
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  areas: { type: integer }
+                  streets: { type: integer }
+                  landmarks: { type: integer }
+                  named_buildings: { type: integer }
+                  addresses: { type: integer }
+                  addresses_with_house_name: { type: integer }
+                  addresses_with_house_number: { type: integer }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/nearest:
+    get:
+      tags: [Planning]
+      summary: Nearest road to a point (used by the address picker)
+      description: |
+        Tells you whether a point is inside the loaded map regions and which road is closest,
+        e.g. to show "Near MG Road" while a customer places their pin. Allowed from browsers on
+        the sites listed in `DR_CORS_ORIGINS`.
+      operationId: nearest
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 }, example: 9.9816 }
+        - { name: lng, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 }, example: 76.2999 }
+      responses:
+        "200":
+          description: Nearest road (null when outside the area or no road found)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NearestResponse" }
+              examples:
+                inside:
+                  value: { in_service_area: true, road: { name: Seaport-Airport Road, distance_m: 23.7, lat: 9.9817, lng: 76.3001 } }
+                outside:
+                  value: { in_service_area: false, road: null }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/area:
+    get:
+      tags: [System]
+      summary: Area covered by the loaded map regions
+      operationId: area
+      responses:
+        "200":
+          description: Bounding box [minLng, minLat, maxLng, maxLat]
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bbox: { type: array, minItems: 4, maxItems: 4, items: { type: number } }
+              example: { bbox: [74.75, 7.95, 80.45, 13.65] }
+
+  /api/order-route:
+    post:
+      tags: [Planning]
+      summary: Plan an order (rider → pickup → customer)
+      description: |
+        Calculates both legs in parallel and saves the route. When `order_id` is given the order is
+        also registered for live tracking (status `assigned`). Calling it again for an order that is
+        still `assigned` / `to_pickup` updates its points.
+      operationId: planOrderRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderRouteRequest" }
+            examples:
+              withRider:
+                summary: With rider position (gives rider → pickup leg too)
+                value:
+                  order_id: ORD-1001
+                  rider_id: RIDER-7
+                  rider: { lat: 9.9312, lng: 76.2673 }
+                  pickup: { lat: 9.9816, lng: 76.2999 }
+                  drop: { lat: 10.0159, lng: 76.3320 }
+              pickupToCustomerOnly:
+                summary: No rider yet
+                value:
+                  order_id: ORD-1002
+                  pickup: { lat: 9.9816, lng: 76.2999 }
+                  drop: { lat: 10.0159, lng: 76.3320 }
+      responses:
+        "200":
+          description: Planned route
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderRouteResponse" }
+              example:
+                order_id: ORD-1001
+                to_pickup: { distance_m: 7421.3, duration_s: 812.4 }
+                to_drop: { distance_m: 5630.0, duration_s: 640.1 }
+                total: { distance_m: 13051.3, duration_s: 1452.5 }
+                snapped:
+                  rider: [76.267412, 9.931166]
+                  pickup: [76.299871, 9.981702]
+                  drop: [76.331905, 10.015844]
+                geojson:
+                  type: FeatureCollection
+                  features:
+                    - type: Feature
+                      properties: { leg: to_pickup, distance_m: 7421.3, duration_s: 812.4 }
+                      geometry: { type: LineString, coordinates: [[76.2674, 9.9312], [76.2801, 9.9555], [76.2999, 9.9817]] }
+                    - type: Feature
+                      properties: { leg: to_drop, distance_m: 5630.0, duration_s: 640.1 }
+                      geometry: { type: LineString, coordinates: [[76.2999, 9.9817], [76.3150, 10.0001], [76.3319, 10.0158]] }
+                saved_id: 42
+                live_tracking: true
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/order-route/{order_id}:
+    get:
+      tags: [Planning]
+      summary: Latest saved planned route for an order
+      operationId: getOrderRoute
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      responses:
+        "200":
+          description: Saved route
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedOrderRoute" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/route:
+    post:
+      tags: [Planning]
+      summary: Route through 2–25 points in the given order
+      operationId: route
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RouteRequest" }
+            example:
+              points:
+                - { lat: 9.9312, lng: 76.2673 }
+                - { lat: 9.9816, lng: 76.2999 }
+                - { lat: 10.0159, lng: 76.3320 }
+      responses:
+        "200":
+          description: Route
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RouteResponse" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/orders/{order_id}/location:
+    post:
+      tags: [Live tracking]
+      summary: Rider location update
+      description: |
+        Send every 5–10 seconds during the ride. Stores the fix, re-routes from the rider to the current
+        target (pickup before `picked_up`, customer after) and pushes the new state to open maps.
+        The first update moves the order from `assigned` to `to_pickup`.
+        Fixes with `accuracy` worse than 150 m are stored but do not move the rider (`used_fix: false`).
+      operationId: updateLocation
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LocationUpdate" }
+            example: { lat: 9.95, lng: 76.28, heading: 40, speed: 8.3, accuracy: 12, rider_id: RIDER-7 }
+      responses:
+        "200":
+          description: Remaining route summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LocationResponse" }
+              example:
+                order_id: ORD-1001
+                status: to_pickup
+                target: pickup
+                remaining_m: 4310.6
+                remaining_s: 498.2
+                eta: "2026-10-26T05:12:31.018989+00:00"
+                arrived: false
+                distance_to_target_m: 4120.4
+                used_fix: true
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/orders/{order_id}/live:
+    get:
+      tags: [Live tracking]
+      summary: Current live state of an order
+      description: Same object the WebSocket pushes. Includes the travelled trail and remaining route as GeoJSON.
+      operationId: getLiveState
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      responses:
+        "200":
+          description: Live state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveState" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/orders/{order_id}/pickup:
+    post:
+      tags: [Completion]
+      summary: Confirm pickup (order ID + rider ID)
+      description: |
+        Checks, in order:
+        1. `rider_id` is the rider assigned to the order → else `403`.
+           An order created without a rider is claimed by the first rider to confirm.
+        2. Order is not cancelled → else `409`.
+        3. Rider is within `DR_COMPLETE_RADIUS_M` (default 250 m) of the pickup → else `422` with the distance.
+           Position comes from `lat`/`lng` in the body, else the last GPS update if under 3 minutes old.
+           With no position the check is skipped, unless `DR_COMPLETE_REQUIRE_LOCATION=1`.
+
+        Repeating the call returns `already_done: true` and changes nothing.
+      operationId: confirmPickup
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Completion" }
+            example: { rider_id: RIDER-7, lat: 9.9818, lng: 76.3001 }
+      responses:
+        "200":
+          description: Confirmed (or already confirmed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompletionResponse" }
+        "403": { $ref: "#/components/responses/WrongRider" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422":
+          description: Too far from the pickup, rider location required, or invalid body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { detail: "Rider is 4135 m from the pickup (limit 250 m, position from sent with request)" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/orders/{order_id}/deliver:
+    post:
+      tags: [Completion]
+      summary: Confirm delivery (order ID + rider ID)
+      description: |
+        Same checks as pickup, plus the order must already be `picked_up` (`409` otherwise),
+        and distance is measured to the customer. Use `note` for OTP / receiver name.
+      operationId: confirmDelivery
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Completion" }
+            example: { rider_id: RIDER-7, lat: 10.0157, lng: 76.3318, note: "OTP 4821 verified" }
+      responses:
+        "200":
+          description: Confirmed (or already confirmed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompletionResponse" }
+        "403": { $ref: "#/components/responses/WrongRider" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not picked up yet, or cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { detail: "Order has not been picked up yet. Confirm pickup first" }
+        "422":
+          description: Too far from the customer, rider location required, or invalid body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { detail: "Rider is 820 m from the customer (limit 250 m, position from last GPS update)" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/riders/{rider_id}/orders:
+    get:
+      tags: [Riders]
+      summary: A rider's orders, newest first (max 100)
+      operationId: riderOrders
+      parameters:
+        - name: rider_id
+          in: path
+          required: true
+          schema: { type: string }
+          example: RIDER-7
+        - name: active
+          in: query
+          description: "true (default) = only orders not yet delivered or cancelled"
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RiderOrder" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/orders/{order_id}/status:
+    post:
+      tags: [Admin]
+      summary: Set status with no checks (ops override)
+      description: No rider or location checks. For support staff, e.g. cancelling. Riders should use `/pickup` and `/deliver`.
+      operationId: setStatus
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StatusUpdate" }
+            example: { status: cancelled }
+      responses:
+        "200":
+          description: New live state (without trail)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveState" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+components:
+  parameters:
+    OrderId:
+      name: order_id
+      in: path
+      required: true
+      schema: { type: string }
+      example: ORD-1001
+
+  responses:
+    NotFound:
+      description: Unknown order
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: Unknown order }
+    WrongRider:
+      description: Order belongs to another rider
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: Order ORD-1001 is assigned to a different rider }
+    Conflict:
+      description: Not allowed in the order's current status
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: Order is already delivered }
+    Unprocessable:
+      description: Invalid input, point outside the map area, or no road route
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            outsideArea:
+              value: { detail: "pickup (76.29, 9.98) is outside the map area. Check that lat and lng are not swapped." }
+            noRoute:
+              value: { detail: "No route found: Impossible route between points" }
+            badBody:
+              value:
+                detail:
+                  - { type: missing, loc: [body, drop], msg: Field required, input: {} }
+    Unavailable:
+      description: Routing engine or database not reachable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { detail: Routing engine is not reachable }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                properties:
+                  type: { type: string }
+                  loc: { type: array, items: { oneOf: [{ type: string }, { type: integer }] } }
+                  msg: { type: string }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        osrm: { type: boolean }
+        db: { type: boolean }
+
+    Point:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number, format: double, minimum: -90, maximum: 90, example: 9.9312 }
+        lng: { type: number, format: double, minimum: -180, maximum: 180, example: 76.2673 }
+
+    LngLat:
+      type: array
+      description: "[lng, lat]"
+      minItems: 2
+      maxItems: 2
+      items: { type: number, format: double }
+      example: [76.2673, 9.9312]
+
+    GeoJSONPoint:
+      type: object
+      properties:
+        type: { type: string, enum: [Point] }
+        coordinates: { $ref: "#/components/schemas/LngLat" }
+
+    LineString:
+      type: object
+      properties:
+        type: { type: string, enum: [LineString] }
+        coordinates:
+          type: array
+          items: { $ref: "#/components/schemas/LngLat" }
+
+    FeatureCollection:
+      type: object
+      properties:
+        type: { type: string, enum: [FeatureCollection] }
+        features:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string, enum: [Feature] }
+              properties:
+                type: object
+                description: |
+                  Planned routes: `leg` = `to_pickup` | `to_drop` | `route`, with `distance_m`, `duration_s`.
+                  Live state: `kind` = `trail` (travelled) | `remaining`, and `target`.
+                additionalProperties: true
+              geometry: { $ref: "#/components/schemas/LineString" }
+
+    Leg:
+      type: object
+      properties:
+        distance_m: { type: number, description: metres }
+        duration_s: { type: number, description: seconds }
+
+    NullableLeg:
+      type: object
+      nullable: true
+      description: null when no rider position was given
+      properties:
+        distance_m: { type: number, description: metres }
+        duration_s: { type: number, description: seconds }
+
+    NullablePoint:
+      type: object
+      nullable: true
+      description: Rider's current position (optional)
+      required: [lat, lng]
+      properties:
+        lat: { type: number, format: double, minimum: -90, maximum: 90, example: 9.9312 }
+        lng: { type: number, format: double, minimum: -180, maximum: 180, example: 76.2673 }
+
+    NullableLngLat:
+      type: array
+      nullable: true
+      description: "[lng, lat], null when no rider position was given"
+      minItems: 2
+      maxItems: 2
+      items: { type: number, format: double }
+
+    NullableGeoJSONPoint:
+      type: object
+      nullable: true
+      properties:
+        type: { type: string, enum: [Point] }
+        coordinates: { $ref: "#/components/schemas/LngLat" }
+
+    OrderRouteRequest:
+      type: object
+      required: [pickup, drop]
+      properties:
+        order_id: { type: string, nullable: true, description: Give one to enable live tracking, example: ORD-1001 }
+        rider_id: { type: string, nullable: true, example: RIDER-7 }
+        rider: { $ref: "#/components/schemas/NullablePoint" }
+        pickup: { $ref: "#/components/schemas/Point" }
+        drop:
+          allOf: [{ $ref: "#/components/schemas/Point" }]
+          description: Customer location
+
+    OrderRouteResponse:
+      type: object
+      properties:
+        order_id: { type: string, nullable: true }
+        to_pickup: { $ref: "#/components/schemas/NullableLeg" }
+        to_drop: { $ref: "#/components/schemas/Leg" }
+        total: { $ref: "#/components/schemas/Leg" }
+        snapped:
+          type: object
+          description: Nearest road point to each input
+          properties:
+            rider: { $ref: "#/components/schemas/NullableLngLat" }
+            pickup: { $ref: "#/components/schemas/LngLat" }
+            drop: { $ref: "#/components/schemas/LngLat" }
+        geojson: { $ref: "#/components/schemas/FeatureCollection" }
+        saved_id: { type: integer, nullable: true }
+        live_tracking: { type: boolean, description: true when registered for tracking }
+
+    SavedOrderRoute:
+      type: object
+      properties:
+        id: { type: integer }
+        order_id: { type: string }
+        created_at: { type: string, format: date-time }
+        to_pickup: { $ref: "#/components/schemas/NullableLeg" }
+        to_drop: { $ref: "#/components/schemas/Leg" }
+        points:
+          type: object
+          properties:
+            rider: { $ref: "#/components/schemas/NullableGeoJSONPoint" }
+            pickup: { $ref: "#/components/schemas/GeoJSONPoint" }
+            drop: { $ref: "#/components/schemas/GeoJSONPoint" }
+        geojson: { $ref: "#/components/schemas/FeatureCollection" }
+
+    RouteRequest:
+      type: object
+      required: [points]
+      properties:
+        points:
+          type: array
+          minItems: 2
+          maxItems: 25
+          items: { $ref: "#/components/schemas/Point" }
+
+    RouteResponse:
+      type: object
+      properties:
+        distance_m: { type: number }
+        duration_s: { type: number }
+        snapped: { type: array, items: { $ref: "#/components/schemas/LngLat" } }
+        geojson: { $ref: "#/components/schemas/FeatureCollection" }
+
+    LocationUpdate:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat: { type: number, format: double, minimum: -90, maximum: 90 }
+        lng: { type: number, format: double, minimum: -180, maximum: 180 }
+        rider_id: { type: string, nullable: true }
+        heading: { type: number, minimum: 0, maximum: 360, nullable: true, description: "degrees, 0 = north" }
+        speed: { type: number, minimum: 0, nullable: true, description: metres per second }
+        accuracy: { type: number, minimum: 0, nullable: true, description: GPS accuracy in metres }
+        recorded_at: { type: string, format: date-time, nullable: true, description: When the phone took the fix }
+
+    OrderStatus:
+      type: string
+      enum: [assigned, to_pickup, picked_up, delivered, cancelled]
+
+    Target:
+      type: string
+      nullable: true
+      enum: [pickup, drop, null]
+      description: Where the rider is heading now (null once delivered or cancelled)
+
+    LocationResponse:
+      type: object
+      properties:
+        order_id: { type: string }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        target: { $ref: "#/components/schemas/Target" }
+        remaining_m: { type: number, nullable: true }
+        remaining_s: { type: number, nullable: true }
+        eta: { type: string, format: date-time, nullable: true }
+        arrived: { type: boolean, description: Within 60 m of the target }
+        distance_to_target_m: { type: number, nullable: true, description: Straight-line distance }
+        used_fix: { type: boolean, description: false when the GPS fix was too inaccurate to use }
+
+    LiveState:
+      type: object
+      properties:
+        order_id: { type: string }
+        rider_id: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        target: { $ref: "#/components/schemas/Target" }
+        pickup: { $ref: "#/components/schemas/Point" }
+        drop: { $ref: "#/components/schemas/Point" }
+        rider:
+          type: object
+          nullable: true
+          properties:
+            lat: { type: number }
+            lng: { type: number }
+            heading: { type: number, nullable: true }
+            speed_mps: { type: number, nullable: true }
+            last_seen: { type: string, format: date-time, nullable: true }
+        remaining_m: { type: number, nullable: true }
+        remaining_s: { type: number, nullable: true }
+        eta: { type: string, format: date-time, nullable: true }
+        arrived: { type: boolean }
+        distance_to_target_m: { type: number, nullable: true }
+        picked_up_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+        picked_up_by: { type: string, nullable: true }
+        delivered_by: { type: string, nullable: true }
+        pickup_note: { type: string, nullable: true }
+        delivery_note: { type: string, nullable: true }
+        geojson: { $ref: "#/components/schemas/FeatureCollection" }
+
+    Completion:
+      type: object
+      required: [rider_id]
+      properties:
+        rider_id: { type: string, description: Must be the rider assigned to the order, example: RIDER-7 }
+        lat: { type: number, format: double, minimum: -90, maximum: 90, nullable: true, description: Rider's position when confirming }
+        lng: { type: number, format: double, minimum: -180, maximum: 180, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, description: "Receiver name, OTP checked, remarks" }
+
+    CompletionResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        already_done: { type: boolean, description: true when this step was confirmed before (nothing changed) }
+        distance_from_target_m: { type: number, nullable: true, description: Absent when already_done }
+        location_checked: { type: boolean, description: Absent when already_done }
+        order: { $ref: "#/components/schemas/LiveState" }
+      example:
+        ok: true
+        already_done: false
+        distance_from_target_m: 31.2
+        location_checked: true
+        order:
+          order_id: ORD-1001
+          rider_id: RIDER-7
+          status: picked_up
+          target: drop
+          pickup: { lat: 9.9816, lng: 76.2999 }
+          drop: { lat: 10.0159, lng: 76.332 }
+          rider: { lat: 9.9818, lng: 76.3001, heading: null, speed_mps: null, last_seen: "2026-10-26T04:58:02+00:00" }
+          remaining_m: 5630.0
+          remaining_s: 640.1
+          eta: "2026-10-26T05:08:42+00:00"
+          arrived: false
+          distance_to_target_m: 5104.9
+          picked_up_at: "2026-10-26T04:58:02+00:00"
+          delivered_at: null
+          updated_at: "2026-10-26T04:58:02+00:00"
+          picked_up_by: RIDER-7
+          delivered_by: null
+          pickup_note: null
+          delivery_note: null
+          geojson: { type: FeatureCollection, features: [] }
+
+    StatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [to_pickup, picked_up, delivered, cancelled] }
+
+    PostalAddress:
+      type: object
+      properties:
+        house_number: { type: string, nullable: true }
+        house_name: { type: string, nullable: true, description: "addr:housename, e.g. Rose Villa" }
+        road: { type: string, nullable: true }
+        locality: { type: string, nullable: true, description: Suburb / neighbourhood / village }
+        city: { type: string, nullable: true }
+        district: { type: string, nullable: true }
+        state: { type: string, nullable: true }
+        postcode: { type: string, nullable: true, description: PIN code when known nearby }
+
+    Suggestion:
+      type: object
+      properties:
+        id: { type: integer }
+        kind: { type: string, enum: [place, street, poi, address] }
+        type: { type: string, description: "Label for the kind: Area, Street, Place, Address", example: Place }
+        category: { type: string, nullable: true, description: "Place type, road type or OSM tag such as shop=mall", example: shop=mall }
+        name: { type: string, example: LuLu International Shopping Mall }
+        subtitle: { type: string, example: "Edappally, Kochi, Ernakulam, Kerala" }
+        lat: { type: number, example: 10.02725 }
+        lng: { type: number, example: 76.309 }
+        zoom: { type: integer, description: Suggested map zoom for this result, example: 18 }
+        address: { $ref: "#/components/schemas/PostalAddress" }
+
+    ReverseResponse:
+      type: object
+      properties:
+        display: { type: string, nullable: true, description: Short human text for the pin }
+        landmark:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            category: { type: string, nullable: true }
+            distance_m: { type: number }
+        address: { $ref: "#/components/schemas/PostalAddress" }
+
+    NearestResponse:
+      type: object
+      properties:
+        in_service_area: { type: boolean, description: Inside the loaded map regions }
+        road:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string, nullable: true, description: Road name from OpenStreetMap (null if unnamed) }
+            distance_m: { type: number, description: Straight-line distance from the point to the road }
+            lat: { type: number }
+            lng: { type: number }
+
+    RiderOrder:
+      type: object
+      properties:
+        order_id: { type: string }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        pickup: { $ref: "#/components/schemas/Point" }
+        drop: { $ref: "#/components/schemas/Point" }
+        remaining_m: { type: number, nullable: true }
+        remaining_s: { type: number, nullable: true }
+        eta: { type: string, format: date-time, nullable: true }
+        picked_up_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }

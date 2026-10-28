@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rider Test</title>
+<style>
+  :root { --ink:#1f1d1a; --muted:#6e675d; --line:#e4ded3; --bg:#f7f4ee; --card:#fffdf9; --go:#1f9d6b; --warn:#e8742a; --err:#c0392b; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ink:#f1ede6; --muted:#a49c90; --line:#3a362f; --bg:#171614; --card:#1f1d1a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:420px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:18px; margin:0 0 4px; } p { color:var(--muted); margin:0 0 16px; font-size:13.5px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px; }
+  label { display:block; font-size:12px; font-weight:600; color:var(--muted); margin:0 0 5px; }
+  input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:9px; font:inherit; margin-bottom:12px; background:transparent; color:var(--ink); }
+  button { width:100%; padding:13px; border:0; border-radius:11px; font:600 15px system-ui; cursor:pointer; margin-top:8px; color:#fff; background:var(--ink); }
+  #share.on { background:var(--err); }
+  .pick { background:var(--warn); } .done { background:var(--go); }
+  .stat { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px dashed var(--line); font-size:14px; }
+  .stat:last-child { border:0; } .stat b { font-variant-numeric:tabular-nums; }
+  #log { color:var(--muted); font-size:12.5px; margin-top:10px; min-height:1.4em; }
+  .err { color:var(--err) !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Rider location test</h1>
+  <p>Sends this phone's GPS to the routing API every few seconds. Phones only allow GPS on <b>https://</b> pages (or localhost).</p>
+
+  <div class="card">
+    <label for="order">Order ID</label>
+    <input id="order" placeholder="ORD-1001">
+    <label for="rider">Rider ID</label>
+    <input id="rider" placeholder="RIDER-7">
+    <button id="share">Start sharing location</button>
+    <button class="pick" id="picked">Picked up</button>
+    <button class="done" id="delivered">Delivered</button>
+    <div id="log"></div>
+  </div>
+
+  <div class="card" id="stats" hidden>
+    <div class="stat"><span>Status</span><b id="s-status">–</b></div>
+    <div class="stat"><span>Heading to</span><b id="s-target">–</b></div>
+    <div class="stat"><span>Remaining</span><b id="s-rem">–</b></div>
+    <div class="stat"><span>ETA</span><b id="s-eta">–</b></div>
+    <div class="stat"><span>GPS accuracy</span><b id="s-acc">–</b></div>
+  </div>
+</main>
+<script>
+const API = (window.DR_CONFIG && DR_CONFIG.apiUrl) || "/api";
+const SEND_EVERY_MS = 5000;
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+$("order").value = q.get("order") || "";
+$("rider").value = q.get("rider") || "";
+let watch = null, lastSent = 0, latest = null, timer = null;
+
+function log(msg, bad) { $("log").textContent = msg; $("log").className = bad ? "err" : ""; }
+const oid = () => encodeURIComponent($("order").value.trim());
+
+async function post(path, body) {
+  const r = await fetch(`${API}/orders/${oid()}/${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+
+function show(d) {
+  $("stats").hidden = false;
+  $("s-status").textContent = d.status;
+  $("s-target").textContent = d.target ? (d.arrived ? d.target + " (arrived)" : d.target) : "–";
+  $("s-rem").textContent = d.remaining_m != null ? `${(d.remaining_m / 1000).toFixed(2)} km · ${Math.round(d.remaining_s / 60)} min` : "–";
+  $("s-eta").textContent = d.eta ? new Date(d.eta).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "–";
+}
+
+async function send() {
+  if (!latest) return;
+  const c = latest.coords;
+  try {
+    const d = await post("location", {
+      lat: c.latitude, lng: c.longitude, accuracy: c.accuracy,
+      heading: c.heading != null && !isNaN(c.heading) ? c.heading : null,
+      speed: c.speed != null && !isNaN(c.speed) ? c.speed : null,
+      rider_id: $("rider").value.trim() || null,
+      recorded_at: new Date(latest.timestamp).toISOString(),
+    });
+    lastSent = Date.now();
+    show(d);
+    log(`Sent ${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)} at ${new Date().toLocaleTimeString()}`);
+  } catch (e) { log(e.message, true); }
+}
+
+$("share").onclick = () => {
+  if (watch != null) {
+    navigator.geolocation.clearWatch(watch); clearInterval(timer); watch = null;
+    $("share").textContent = "Start sharing location"; $("share").classList.remove("on");
+    return log("Stopped");
+  }
+  if (!$("order").value.trim()) return log("Enter the order ID", true);
+  if (!navigator.geolocation) return log("This browser has no GPS access", true);
+  watch = navigator.geolocation.watchPosition((p) => {
+    latest = p;
+    $("s-acc").textContent = Math.round(p.coords.accuracy) + " m";
+    if (Date.now() - lastSent > SEND_EVERY_MS) send();
+  }, (e) => log("GPS: " + e.message, true), { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+  timer = setInterval(() => { if (Date.now() - lastSent > SEND_EVERY_MS) send(); }, SEND_EVERY_MS);  // keep sending while standing still
+  $("share").textContent = "Stop sharing"; $("share").classList.add("on");
+  log("Waiting for GPS…");
+};
+
+// Confirm pickup / delivery: the server checks the rider ID, the order state and the distance.
+for (const [id, path] of [["picked", "pickup"], ["delivered", "deliver"]]) {
+  $(id).onclick = async () => {
+    if (!$("order").value.trim()) return log("Enter the order ID", true);
+    if (!$("rider").value.trim()) return log("Enter the rider ID", true);
+    const body = { rider_id: $("rider").value.trim() };
+    if (latest) { body.lat = latest.coords.latitude; body.lng = latest.coords.longitude; }
+    try {
+      const d = await post(path, body);
+      show(d.order);
+      log(d.already_done ? "Already confirmed" :
+        `Confirmed ${path === "pickup" ? "pickup" : "delivery"}` +
+        (d.distance_from_target_m != null ? ` (${Math.round(d.distance_from_target_m)} m away)` : ""));
+      if (path === "deliver" && watch != null) $("share").click();
+    } catch (e) { log(e.message, true); }
+  };
+}
+</script>
+<script src="config.js"></script>
+</body>
+</html>

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery Route</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="config.js"></script>
+<script src="map-style.js"></script>
+<script src="live.js"></script>
+<style>
+  :root {
+    --ink: #1f1d1a; --muted: #6e675d; --line: #e4ded3; --panel: #fffdf9;
+    --rider: #3b6fd8; --pickup: #e8742a; --drop: #1f9d6b; --err: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: #f4f1ea; }
+  #map { position: absolute; inset: 0; }
+  .panel {
+    position: absolute; top: 16px; left: 16px; width: 340px; max-height: calc(100% - 32px); overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 8px 28px rgba(40,30,10,.12); padding: 18px;
+  }
+  h1 { font-size: 16px; margin: 0 0 2px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+  label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 5px; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; flex: none; color: #fff; font-size: 11px; font-weight: 700;
+         display: grid; place-items: center; }
+  input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit;
+          background: #fff; color: var(--ink); }
+  input:focus { outline: 2px solid #c9dafc; border-color: var(--rider); }
+  .pick { padding: 7px 9px; border: 1px solid var(--line); background: #fff; border-radius: 8px; cursor: pointer;
+          font: inherit; font-size: 12px; color: var(--muted); }
+  .pick.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .go { width: 100%; margin-top: 16px; padding: 11px; border: 0; border-radius: 10px; background: var(--ink); color: #fff;
+        font: inherit; font-weight: 600; cursor: pointer; }
+  .go:disabled { opacity: .5; cursor: wait; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .err { color: var(--err); font-size: 13px; margin-top: 10px; }
+  .legs { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
+  .leg { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .leg span:first-child { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 18px; height: 4px; border-radius: 2px; }
+  .leg b { font-variant-numeric: tabular-nums; }
+  .total { font-weight: 700; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .embed .panel, .live .panel { display: none; }
+  /* live tracking */
+  #dr-live-card { display: none; }
+  .live #dr-live-card { display: block; position: absolute; left: 12px; bottom: 28px; min-width: 230px; max-width: calc(100% - 24px);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    box-shadow: 0 6px 20px rgba(40,30,10,.14); }
+  .live.no-card #dr-live-card { display: none; }
+  .dr-status { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .dr-status i { width: 9px; height: 9px; border-radius: 50%; }
+  .dr-eta { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+  .dr-eta b { font-size: 22px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .dr-eta span, .dr-sub { color: var(--muted); font-size: 12.5px; }
+  .dr-sub { margin-top: 4px; }
+  .dr-stale { color: var(--err); }
+  #dr-recenter { position: absolute; right: 10px; bottom: 40px; padding: 8px 12px; border-radius: 20px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); font: 600 12.5px system-ui; box-shadow: 0 3px 10px rgba(0,0,0,.15); cursor: pointer; }
+  .dr-rider { width: 34px; height: 34px; position: relative; }
+  .dr-rider-arrow { position: absolute; inset: 0; filter: drop-shadow(0 2px 3px rgba(0,0,0,.3)); }
+  .dr-rider-halo { position: absolute; inset: -10px; border-radius: 50%; background: rgba(59,111,216,.22);
+    animation: drpulse 2s ease-out infinite; }
+  @keyframes drpulse { from { transform: scale(.6); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .dr-rider-halo { animation: none; } }
+  @media (max-width: 640px) {
+    .panel { top: auto; bottom: 0; left: 0; width: 100%; max-height: 55%; border-radius: 14px 14px 0 0; padding: 14px 16px; }
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --ink: #f1ede6; --muted: #a49c90; --line: #3a362f; --panel: #1f1d1a; }
+    :root:not([data-theme="light"]) input, :root:not([data-theme="light"]) .pick { background: #2a2722; }
+    :root:not([data-theme="light"]) .go, :root:not([data-theme="light"]) .pick.on { background: #f1ede6; color: #1f1d1a; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="dr-live-card"></div>
+<button id="dr-recenter" hidden>Re-center</button>
+
+<div class="panel">
+  <h1>Delivery route</h1>
+  <p class="sub">Rider → pickup → customer. Type <i>lat, lng</i> or pick on the map.</p>
+
+  <label for="order">Order ID (optional)</label>
+  <div class="row"><input id="order" placeholder="ORD-1001"></div>
+
+  <label for="rider">Rider location (optional)</label>
+  <div class="row">
+    <span class="dot" style="background:var(--rider)">R</span>
+    <input id="rider" placeholder="9.9312, 76.2673">
+    <button class="pick" data-for="rider">Pick</button>
+  </div>
+
+  <label for="pickup">Pickup</label>
+  <div class="row">
+    <span class="dot" style="background:var(--pickup)">P</span>
+    <input id="pickup" placeholder="9.9816, 76.2999">
+    <button class="pick" data-for="pickup">Pick</button>
+  </div>
+
+  <label for="drop">Customer</label>
+  <div class="row">
+    <span class="dot" style="background:var(--drop)">C</span>
+    <input id="drop" placeholder="10.0159, 76.3320">
+    <button class="pick" data-for="drop">Pick</button>
+  </div>
+
+  <button class="go" id="go">Get route</button>
+  <div class="hint">Drag the markers to adjust; the route updates.</div>
+  <div class="err" id="err" hidden></div>
+  <div class="legs" id="legs" hidden></div>
+</div>
+
+<script>
+const CFG = window.DR_CONFIG;
+const COLORS = { rider: "#3b6fd8", pickup: "#e8742a", drop: "#1f9d6b" };
+const LABELS = { rider: "R", pickup: "P", drop: "C" };
+const $ = (id) => document.getElementById(id);
+
+// ---- map -------------------------------------------------------------------
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: drMapStyle(CFG.tilesUrl, CFG.glyphs),
+  center: CFG.center, zoom: CFG.zoom, maxPitch: 0, attributionControl: { compact: true },
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
+drAddressLabels(map, CFG.apiUrl);   // house names / numbers when zoomed in
+
+const emptyFC = { type: "FeatureCollection", features: [] };
+map.once("style.load", () => {   // not "load": still works if tiles are missing
+  map.addSource("route", { type: "geojson", data: emptyFC });
+  map.addLayer({ id: "route-casing", type: "line", source: "route",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#ffffff", "line-width": 9 } });
+  map.addLayer({ id: "route-to-pickup", type: "line", source: "route",
+    filter: ["==", ["get", "leg"], "to_pickup"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": COLORS.rider, "line-width": 5, "line-dasharray": [1.5, 1.2] } });
+  map.addLayer({ id: "route-to-drop", type: "line", source: "route",
+    filter: ["in", ["get", "leg"], ["literal", ["to_drop", "route"]]],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": COLORS.drop, "line-width": 5 } });
+  initFromUrl();
+});
+
+// ---- markers ---------------------------------------------------------------
+const markers = {};
+function markerEl(kind) {
+  // outer element belongs to MapLibre (it sets its transform); the shape lives inside
+  const el = document.createElement("div");
+  el.style.cssText = "width:30px;height:38px;cursor:grab";
+  el.innerHTML = `<div style="width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);
+    background:${COLORS[kind]};border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.35);display:grid;place-items:center">
+    <span style="transform:rotate(45deg);color:#fff;font:700 12px system-ui">${LABELS[kind]}</span></div>`;
+  return el;
+}
+function setPoint(kind, lat, lng, { route = false } = {}) {
+  $(kind).value = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  if (!markers[kind]) {
+    markers[kind] = new maplibregl.Marker({ element: markerEl(kind), draggable: true, anchor: "bottom" })
+      .setLngLat([lng, lat]).addTo(map);
+    markers[kind].on("dragend", () => {
+      const p = markers[kind].getLngLat();
+      $(kind).value = `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`;
+      if (parse("pickup") && parse("drop")) getRoute();
+    });
+  } else {
+    markers[kind].setLngLat([lng, lat]);
+  }
+  if (route && parse("pickup") && parse("drop")) getRoute();
+}
+function parse(kind) {
+  const v = $(kind).value.trim();
+  if (!v) return null;
+  const m = v.split(/[\s,]+/).map(Number);
+  if (m.length !== 2 || m.some(isNaN)) throw new Error(`${kind}: write it as "lat, lng"`);
+  return { lat: m[0], lng: m[1] };
+}
+for (const kind of ["rider", "pickup", "drop"]) {
+  $(kind).addEventListener("change", () => {
+    try { const p = parse(kind); if (p) setPoint(kind, p.lat, p.lng); else removeMarker(kind); showErr(); }
+    catch (e) { showErr(e.message); }
+  });
+}
+function removeMarker(kind) { if (markers[kind]) { markers[kind].remove(); delete markers[kind]; } }
+
+// ---- pick on map -----------------------------------------------------------
+let picking = null;
+document.querySelectorAll(".pick").forEach((b) => b.addEventListener("click", () => {
+  picking = picking === b.dataset.for ? null : b.dataset.for;
+  document.querySelectorAll(".pick").forEach((x) => x.classList.toggle("on", x.dataset.for === picking));
+  map.getCanvas().style.cursor = picking ? "crosshair" : "";
+}));
+map.on("click", (e) => {
+  if (!picking) return;
+  setPoint(picking, e.lngLat.lat, e.lngLat.lng, { route: true });
+  picking = null;
+  document.querySelectorAll(".pick").forEach((x) => x.classList.remove("on"));
+  map.getCanvas().style.cursor = "";
+});
+
+// ---- routing ---------------------------------------------------------------
+const fmtKm = (m) => (m / 1000).toFixed(m < 10000 ? 2 : 1) + " km";
+const fmtMin = (s) => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+function showErr(msg) { $("err").hidden = !msg; $("err").textContent = msg || ""; }
+
+async function getRoute() {
+  showErr();
+  let body;
+  try {
+    body = { order_id: $("order").value.trim() || null, rider: parse("rider"), pickup: parse("pickup"), drop: parse("drop") };
+    if (!body.pickup || !body.drop) throw new Error("Pickup and customer locations are required");
+  } catch (e) { return showErr(e.message); }
+
+  $("go").disabled = true;
+  try {
+    const r = await fetch(`${CFG.apiUrl}/order-route`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Routing failed");
+    map.getSource("route").setData(data.geojson);
+    renderLegs(data);
+    fitTo(data.geojson);
+  } catch (e) {
+    showErr(e.message === "Failed to fetch" ? "Cannot reach the routing API" : e.message);
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+function renderLegs(d) {
+  const rows = [];
+  if (d.to_pickup) rows.push(["Rider → pickup", COLORS.rider, d.to_pickup, true]);
+  rows.push(["Pickup → customer", COLORS.drop, d.to_drop, false]);
+  $("legs").innerHTML = rows.map(([name, c, l, dashed]) => `
+    <div class="leg"><span><i class="swatch" style="background:${dashed
+      ? `repeating-linear-gradient(90deg,${c} 0 5px,transparent 5px 8px)` : c}"></i>${name}</span>
+      <b>${fmtKm(l.distance_m)} · ${fmtMin(l.duration_s)}</b></div>`).join("")
+    + (d.to_pickup ? `<div class="leg total"><span>Total</span><b>${fmtKm(d.total.distance_m)} · ${fmtMin(d.total.duration_s)}</b></div>` : "");
+  $("legs").hidden = false;
+}
+
+function fitTo(fc) {
+  const b = new maplibregl.LngLatBounds();
+  fc.features.forEach((f) => f.geometry.coordinates.forEach((c) => b.extend(c)));
+  Object.values(markers).forEach((m) => b.extend(m.getLngLat()));
+  const narrow = innerWidth <= 640, embed = document.body.classList.contains("embed");
+  map.fitBounds(b, { padding: embed ? 40 : narrow ? { top: 40, bottom: innerHeight * 0.55 + 20, left: 30, right: 30 }
+                                         : { top: 50, bottom: 50, left: 390, right: 60 }, maxZoom: 16, duration: 600 });
+}
+
+$("go").addEventListener("click", getRoute);
+
+// ---- URL params: ?rider=lat,lng&pickup=lat,lng&drop=lat,lng&order=ID&embed=1
+function initFromUrl() {
+  const q = new URLSearchParams(location.search);
+  if (q.get("embed") === "1") document.body.classList.add("embed");
+  if (q.get("order")) $("order").value = q.get("order");
+  if (q.get("live") === "1" && q.get("order")) {          // live tracking mode
+    return drLive.start(map, q.get("order"), { card: q.get("card") !== "0" });
+  }
+  let any = false;
+  for (const kind of ["rider", "pickup", "drop"]) {
+    if (!q.get(kind)) continue;
+    $(kind).value = q.get(kind);
+    try { const p = parse(kind); setPoint(kind, p.lat, p.lng); any = true; } catch (e) { showErr(e.message); }
+  }
+  if (any && q.get("pickup") && q.get("drop")) getRoute();
+}
+</script>
+</body>
+</html>

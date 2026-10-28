@@ -1,0 +1,171 @@
+# Delivery routing stack: map + OSRM routing + Python API + its own PostGIS.
+#
+# All data (OSM files, routing graph, tiles, database) is kept on the host in
+# DR_DATA_DIR (default ./data), so containers can be removed and recreated freely.
+#
+# Every name here (project, containers, network, database, user, ports)
+# is prefixed "dr" so nothing collides with an existing Airflow Postgres
+# (which normally uses the name "postgres", db "airflow", port 5432).
+
+name: delivery-routing
+
+x-common: &common
+  restart: unless-stopped
+  networks: [dr-net]
+
+services:
+
+  # ---------------------------------------------------------------- setup ---
+  # Data jobs. Run with:  ./scripts/setup.sh   (again whenever you add/replace a region)
+  # (they are in the "setup" profile, so `docker compose up` skips them)
+
+  dr-osm-merge:
+    build: ./tools/osmium
+    image: dr-osmtools:latest
+    container_name: dr-osm-merge
+    profiles: [setup]
+    command: ["/scripts/merge-osm.sh"]
+    environment:
+      DATA: /data
+    volumes:
+      - ${DR_DATA_DIR:-./data}:/data
+      - ./scripts:/scripts:ro
+    networks: [dr-net]
+
+  dr-geo-import:                       # address search data -> dr_geo schema in dr-postgis
+    build: ./tools/osmium
+    image: dr-osmtools:latest
+    container_name: dr-geo-import
+    profiles: [setup]
+    command: ["/scripts/geocode-import.sh"]
+    environment:
+      DATA: /data
+      SCRIPTS: /scripts
+      PGHOST: dr-postgis
+      PGDATABASE: ${DR_DB_NAME:-dr_routing}
+      PGUSER: ${DR_DB_USER:-dr_routing_user}
+      PGPASSWORD: ${DR_DB_PASSWORD}
+      GEO_CACHE_MB: ${DR_GEO_CACHE_MB:-2000}
+    volumes:
+      - ${DR_DATA_DIR:-./data}:/data
+      - ./scripts:/scripts:ro
+    depends_on:
+      dr-postgis:
+        condition: service_healthy
+    networks: [dr-net]
+
+  dr-osrm-prepare:
+    image: ${DR_OSRM_IMAGE:-ghcr.io/project-osrm/osrm-backend:v5.27.1}
+    container_name: dr-osrm-prepare
+    profiles: [setup]
+    entrypoint: ["/bin/sh", "/scripts/prepare-osrm.sh"]
+    environment:
+      DATA: /data
+      OSRM_PROFILE: ${DR_OSRM_PROFILE:-car}
+    volumes:
+      - ${DR_DATA_DIR:-./data}:/data
+      - ./scripts:/scripts:ro
+    networks: [dr-net]
+
+  dr-tiles-build:
+    image: ghcr.io/onthegomap/planetiler:latest
+    container_name: dr-tiles-build
+    profiles: [setup]
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx${DR_TILES_JAVA_MEM:-6g}"
+    command:
+      - --osm-path=/data/work/combined.osm.pbf
+      - --output=/data/tiles/.build/map.pmtiles
+      - --download                         # ocean/coastline + Natural Earth layers, cached
+      - --download_dir=/data/tiles-sources
+      - --tmpdir=/data/tmp
+      - --force
+      - --maxzoom=14
+    volumes:
+      - ${DR_DATA_DIR:-./data}:/data
+    networks: [dr-net]
+
+  # ------------------------------------------------------------- runtime ---
+
+  dr-osrm:
+    <<: *common
+    image: ${DR_OSRM_IMAGE:-ghcr.io/project-osrm/osrm-backend:v5.27.1}
+    container_name: dr-osrm
+    command: >
+      osrm-routed --algorithm mld
+      --max-table-size 1000
+      /data/osrm/map.osrm
+    volumes:
+      - ${DR_DATA_DIR:-./data}/osrm:/data/osrm:ro
+    ports:
+      - "127.0.0.1:${DR_OSRM_PORT:-5005}:5000"   # local debugging only
+    healthcheck:
+      # image has no curl/wget; the port only opens once the graph is loaded
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5000"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  dr-postgis:
+    <<: *common
+    image: postgis/postgis:16-3.4
+    container_name: dr-postgis
+    environment:
+      POSTGRES_DB: ${DR_DB_NAME:-dr_routing}
+      POSTGRES_USER: ${DR_DB_USER:-dr_routing_user}
+      POSTGRES_PASSWORD: ${DR_DB_PASSWORD:?set DR_DB_PASSWORD in .env}
+    volumes:
+      - ${DR_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data   # on the host, not a docker volume
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "127.0.0.1:${DR_DB_PORT:-5442}:5432"     # NOT 5432, so Airflow's stays free
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DR_DB_USER:-dr_routing_user} -d ${DR_DB_NAME:-dr_routing}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dr-api:
+    <<: *common
+    build: ./api
+    image: dr-routing-api:latest
+    container_name: dr-api
+    environment:
+      DR_OSRM_URL: http://dr-osrm:5000
+      DR_OSRM_PROFILE_PATH: driving
+      DR_DB_DSN: postgresql://${DR_DB_USER:-dr_routing_user}:${DR_DB_PASSWORD}@dr-postgis:5432/${DR_DB_NAME:-dr_routing}
+      DR_SAVE_ROUTES: ${DR_SAVE_ROUTES:-1}
+      DR_BBOX: ${DR_BBOX:-68.0,6.0,97.5,37.5}            # fallback if no bbox file
+      DR_BBOX_FILE: /data/work/bbox.txt                  # written by setup from the regions
+      DR_CORS_ORIGINS: ${DR_CORS_ORIGINS:-*}
+      DR_COMPLETE_RADIUS_M: ${DR_COMPLETE_RADIUS_M:-250}
+      DR_COMPLETE_REQUIRE_LOCATION: ${DR_COMPLETE_REQUIRE_LOCATION:-0}
+    volumes:
+      - ${DR_DATA_DIR:-./data}/work:/data/work:ro
+    depends_on:
+      dr-osrm:
+        condition: service_healthy
+      dr-postgis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DR_API_PORT:-8001}:8000"    # call it directly from your backend
+
+  dr-web:
+    <<: *common
+    image: nginx:1.27-alpine
+    container_name: dr-web
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ${DR_DATA_DIR:-./data}/tiles:/srv/tiles:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [dr-api]
+    ports:
+      - "${DR_WEB_PORT:-8088}:80"                # map page (Airflow uses 8080)
+
+networks:
+  dr-net:
+    name: dr-routing-net
+
+# No docker volumes: everything lives under DR_DATA_DIR on the host
+#   osm/  work/  osrm/  tiles/  tiles-sources/  postgres/

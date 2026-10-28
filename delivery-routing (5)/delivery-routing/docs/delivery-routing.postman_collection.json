@@ -1,0 +1,1157 @@
+{
+  "info": {
+    "name": "Delivery Routing API",
+    "description": "Routing + live tracking for instant orders.\n\nRun the whole collection in order (Runner) for an end-to-end test: it plans an order, sends a location, checks the error cases, confirms pickup and delivery, and cancels a second order.\n\nSet `baseUrl` to your server (e.g. http://SERVER:8088). Coordinates in bodies are {lat, lng}; GeoJSON is [lng, lat].",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0 \u00b7 System",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"osrm and db up\", () => { const j = pm.response.json(); pm.expect(j.osrm).to.be.true; pm.expect(j.db).to.be.true; });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Map area (loaded regions)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/area",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "area"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"4 numbers\", () => pm.expect(pm.response.json().bbox).to.have.length(4));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1a \u00b7 Address picker",
+      "item": [
+        {
+          "name": "Address suggestions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/geocode/search?q=lulu mall&lat={{dropLat}}&lng={{dropLng}}&limit=6",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "geocode",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "lulu mall"
+                },
+                {
+                  "key": "lat",
+                  "value": "{{dropLat}}"
+                },
+                {
+                  "key": "lng",
+                  "value": "{{dropLng}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "6"
+                }
+              ]
+            },
+            "description": "Typeahead while the customer types. lat/lng (optional) ranks nearby results higher. Needs the search data from ./scripts/setup.sh (503 until then)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"list of suggestions\", () => { const j = pm.response.json(); pm.expect(j).to.be.an(\"array\"); if (j.length) pm.expect(j[0]).to.include.keys(\"name\", \"subtitle\", \"lat\", \"lng\", \"address\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Address suggestions (typo)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/geocode/search?q=edapally",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "geocode",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "edapally"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"array\", () => pm.expect(pm.response.json()).to.be.an(\"array\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search data loaded (stats)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/geocode/stats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "geocode",
+                "stats"
+              ]
+            },
+            "description": "How many areas, streets, landmarks and house addresses your .osm.pbf files gave the search."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"counts\", () => pm.expect(pm.response.json()).to.include.keys(\"areas\", \"streets\", \"landmarks\", \"addresses\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "House labels in a map view",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/geocode/labels?bbox=76.305,10.022,76.315,10.030",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "geocode",
+                "labels"
+              ],
+              "query": [
+                {
+                  "key": "bbox",
+                  "value": "76.305,10.022,76.315,10.030"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"geojson\", () => pm.expect(pm.response.json().type).to.eql(\"FeatureCollection\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Address at a pin",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/geocode/reverse?lat={{dropLat}}&lng={{dropLng}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "geocode",
+                "reverse"
+              ],
+              "query": [
+                {
+                  "key": "lat",
+                  "value": "{{dropLat}}"
+                },
+                {
+                  "key": "lng",
+                  "value": "{{dropLng}}"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"has address\", () => pm.expect(pm.response.json().address).to.include.keys(\"road\", \"locality\", \"city\", \"state\", \"postcode\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Nearest road (inside area)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/nearest?lat={{dropLat}}&lng={{dropLng}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "nearest"
+              ],
+              "query": [
+                {
+                  "key": "lat",
+                  "value": "{{dropLat}}"
+                },
+                {
+                  "key": "lng",
+                  "value": "{{dropLng}}"
+                }
+              ]
+            },
+            "description": "What picker.js calls while the customer moves the pin."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"in area\", () => pm.expect(pm.response.json().in_service_area).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Nearest road (outside area)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/nearest?lat=19.07&lng=72.87",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "nearest"
+              ],
+              "query": [
+                {
+                  "key": "lat",
+                  "value": "19.07"
+                },
+                {
+                  "key": "lng",
+                  "value": "72.87"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"outside\", () => pm.expect(pm.response.json().in_service_area).to.be.false);"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Used by the drop-in address picker (picker.js). Customers' saved pins are just lat/lng in your own database."
+    },
+    {
+      "name": "1 \u00b7 Planning",
+      "item": [
+        {
+          "name": "Plan order (rider \u2192 pickup \u2192 customer)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/order-route",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "order-route"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"rider_id\": \"{{riderId}}\",\n  \"rider\": {\n    \"lat\": {{riderLat}},\n    \"lng\": {{riderLng}}\n  },\n  \"pickup\": {\n    \"lat\": {{pickupLat}},\n    \"lng\": {{pickupLng}}\n  },\n  \"drop\": {\n    \"lat\": {{dropLat}},\n    \"lng\": {{dropLng}}\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Call when an order is confirmed. `rider` is optional. Sets `orderId` for the rest of the collection."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// New order ID for every run so the flow can be repeated. Delete this line to use your own.",
+                  "pm.collectionVariables.set(\"orderId\", \"ORD-\" + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"tracking enabled\", () => pm.expect(j.live_tracking).to.be.true);",
+                  "pm.test(\"two legs\", () => pm.expect(j.geojson.features.map(f => f.properties.leg)).to.eql([\"to_pickup\", \"to_drop\"]));",
+                  "console.log(\"orderId =\", pm.collectionVariables.get(\"orderId\"), \"| total km\", (j.total.distance_m / 1000).toFixed(2));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get saved route",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/order-route/{{orderId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "order-route",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"same order\", () => pm.expect(pm.response.json().order_id).to.eql(pm.collectionVariables.get(\"orderId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Route through points",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/route",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "route"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"points\": [\n    {\n      \"lat\": {{riderLat}},\n      \"lng\": {{riderLng}}\n    },\n    {\n      \"lat\": {{pickupLat}},\n      \"lng\": {{pickupLng}}\n    },\n    {\n      \"lat\": {{dropLat}},\n      \"lng\": {{dropLng}}\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"has distance\", () => pm.expect(pm.response.json().distance_m).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error: lat/lng swapped",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/order-route",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "order-route"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pickup\": {\n    \"lat\": 76.2999,\n    \"lng\": 9.9816\n  },\n  \"drop\": {\n    \"lat\": 10.0159,\n    \"lng\": 76.332\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explains\", () => pm.expect(pm.response.json().detail).to.include(\"swapped\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Plan an order before the ride. Always pass `order_id` if you want live tracking."
+    },
+    {
+      "name": "2 \u00b7 Live tracking",
+      "item": [
+        {
+          "name": "Send rider location",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/location",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "location"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": 9.95,\n  \"lng\": 76.28,\n  \"heading\": 40,\n  \"speed\": 8.3,\n  \"accuracy\": 12,\n  \"rider_id\": \"{{riderId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Rider app: every 5\u201310 s. Only lat and lng are required."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"heading to pickup\", () => { pm.expect(j.status).to.eql(\"to_pickup\"); pm.expect(j.target).to.eql(\"pickup\"); });",
+                  "pm.test(\"fix used\", () => pm.expect(j.used_fix).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get live state",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/live",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "live"
+              ]
+            },
+            "description": "Same object the WebSocket ws://HOST/api/orders/{order_id}/ws pushes on every change."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"rider position present\", () => pm.expect(pm.response.json().rider).to.not.be.null);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 \u00b7 Completion (order ID + rider ID)",
+      "item": [
+        {
+          "name": "Error: pickup by wrong rider",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/pickup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "pickup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{otherRiderId}}\",\n  \"lat\": {{pickupLat}},\n  \"lng\": {{pickupLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 403\", () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error: deliver before pickup",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/deliver",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "deliver"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{riderId}}\",\n  \"lat\": {{dropLat}},\n  \"lng\": {{dropLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error: pickup too far away",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/pickup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "pickup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{riderId}}\",\n  \"lat\": 9.95,\n  \"lng\": 76.28\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"gives distance\", () => pm.expect(pm.response.json().detail).to.match(/\\d+ m from the pickup/));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm pickup",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/pickup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "pickup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{riderId}}\",\n  \"lat\": {{pickupLat}},\n  \"lng\": {{pickupLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "lat/lng optional: without them the last GPS update (< 3 min old) is used."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"picked up\", () => { pm.expect(j.already_done).to.be.false; pm.expect(j.order.status).to.eql(\"picked_up\"); });",
+                  "pm.test(\"now heading to customer\", () => pm.expect(j.order.target).to.eql(\"drop\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm pickup again (safe repeat)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/pickup",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "pickup"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{riderId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"already done\", () => pm.expect(pm.response.json().already_done).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm delivery",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/deliver",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "deliver"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{riderId}}\",\n  \"lat\": {{dropLat}},\n  \"lng\": {{dropLng}},\n  \"note\": \"OTP 4821 verified\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"delivered\", () => pm.expect(j.order.status).to.eql(\"delivered\"));",
+                  "pm.test(\"who and note saved\", () => { pm.expect(j.order.delivered_by).to.eql(pm.collectionVariables.get(\"riderId\")); pm.expect(j.order.delivery_note).to.eql(\"OTP 4821 verified\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error: location after delivery",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/location",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "location"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": 10.0,\n  \"lng\": 76.32\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "403 wrong rider \u00b7 409 wrong step \u00b7 422 too far (default 250 m, DR_COMPLETE_RADIUS_M)."
+    },
+    {
+      "name": "4 \u00b7 Riders",
+      "item": [
+        {
+          "name": "Rider's active orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/riders/{{riderId}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "riders",
+                "{{riderId}}",
+                "orders"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"delivered order not listed\", () => pm.expect(pm.response.json().map(o => o.order_id)).to.not.include(pm.collectionVariables.get(\"orderId\")));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rider's order history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/riders/{{riderId}}/orders?active=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "riders",
+                "{{riderId}}",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "active",
+                  "value": "false"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"delivered order listed\", () => pm.expect(pm.response.json().map(o => o.order_id)).to.include(pm.collectionVariables.get(\"orderId\")));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5 \u00b7 Admin (ops only)",
+      "item": [
+        {
+          "name": "Plan a throwaway order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/order-route",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "order-route"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_id\": \"{{adminOrderId}}\",\n  \"pickup\": {\n    \"lat\": {{pickupLat}},\n    \"lng\": {{pickupLng}}\n  },\n  \"drop\": {\n    \"lat\": {{dropLat}},\n    \"lng\": {{dropLng}}\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"adminOrderId\", \"ORD-ADMIN-\" + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel order (no checks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{adminOrderId}}/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{adminOrderId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Override with no rider/location checks. Do not call from rider apps."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"cancelled\", () => pm.expect(pm.response.json().status).to.eql(\"cancelled\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8088"
+    },
+    {
+      "key": "orderId",
+      "value": "ORD-1001"
+    },
+    {
+      "key": "adminOrderId",
+      "value": "ORD-ADMIN-1"
+    },
+    {
+      "key": "riderId",
+      "value": "RIDER-7"
+    },
+    {
+      "key": "otherRiderId",
+      "value": "RIDER-9"
+    },
+    {
+      "key": "riderLat",
+      "value": "9.9312"
+    },
+    {
+      "key": "riderLng",
+      "value": "76.2673"
+    },
+    {
+      "key": "pickupLat",
+      "value": "9.9816"
+    },
+    {
+      "key": "pickupLng",
+      "value": "76.2999"
+    },
+    {
+      "key": "dropLat",
+      "value": "10.0159"
+    },
+    {
+      "key": "dropLng",
+      "value": "76.3320"
+    }
+  ]
+}

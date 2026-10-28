@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Address Form Demo</title>
+<style>
+  :root { --ink:#1f1d1a; --muted:#6e675d; --line:#e4ded3; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#f7f4ee; }
+  main { max-width:560px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:20px; margin:0 0 4px; } p.sub { color:var(--muted); margin:0 0 20px; font-size:14px; }
+  p.sub a { color:inherit; }
+  label { display:block; font-size:12.5px; font-weight:600; color:var(--muted); margin:14px 0 5px; }
+  input { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--line); border-radius:9px; font:inherit; background:#fff; color:var(--ink); }
+  #delivery-pin { height:380px; border-radius:12px; overflow:hidden; border:1px solid var(--line); }
+  .row { display:flex; gap:10px; } .row > div { flex:1; min-width:0; }
+  button.save { margin-top:18px; width:100%; padding:12px; border:0; border-radius:10px; background:var(--ink); color:#fff; font:600 15px system-ui; cursor:pointer; }
+  pre { background:#1f1d1a; color:#e9e4da; padding:12px; border-radius:10px; font-size:12px; overflow:auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Delivery address</h1>
+  <p class="sub" id="modeText"></p>
+
+  <form id="addr">
+    <label for="line1">House / flat, street</label>
+    <input id="line1" name="line1" placeholder="12/345, Lulu Road">
+
+    <label>Exact delivery spot</label>
+    <!-- 1. a box for the map -->
+    <div id="delivery-pin"></div>
+
+    <!-- 2. fields the picker fills in (use type="hidden" for lat/lng in production) -->
+    <div class="row">
+      <div><label for="locality">Area</label><input id="locality" name="locality"></div>
+      <div><label for="city">City</label><input id="city" name="city"></div>
+    </div>
+    <div class="row">
+      <div><label for="state">State</label><input id="state" name="state"></div>
+      <div><label for="postcode">PIN code</label><input id="postcode" name="postcode" inputmode="numeric"></div>
+    </div>
+    <div class="row">
+      <div><label for="lat">Latitude</label><input id="lat" name="lat" readonly></div>
+      <div><label for="lng">Longitude</label><input id="lng" name="lng" readonly></div>
+    </div>
+
+    <button class="save" type="submit">Save address</button>
+  </form>
+  <label>What your form would submit</label>
+  <pre id="out">–</pre>
+</main>
+
+<!-- 3. the picker script from your map server -->
+<script src="picker.js"></script>
+<script>
+  // ?mode=field  -> suggestions appear under the "House / flat, street" field instead of on the map
+  const fieldMode = new URLSearchParams(location.search).get("mode") === "field";
+  document.getElementById("modeText").innerHTML = fieldMode
+    ? 'Suggestions appear under the address field. <a href="?">Search box on the map instead</a>'
+    : 'Search on the map, or move it. <a href="?mode=field">Suggestions under the address field instead</a>';
+
+  // Fill area / city / state / PIN from the pin, but never overwrite what the customer typed.
+  const autoFields = ["locality", "city", "state", "postcode"];
+  const typedByUser = new Set();
+  autoFields.forEach((id) => document.getElementById(id).addEventListener("input", (e) => {
+    if (e.isTrusted) typedByUser.add(id);
+  }));
+  function fillAddress(a) {
+    if (!a) return;
+    for (const id of autoFields) {
+      if (!typedByUser.has(id) && a[id]) document.getElementById(id).value = a[id];
+    }
+  }
+
+  // 4. mount it. `initial` = the saved location when editing an address (omit for a new one).
+  const picker = DRPicker.mount("#delivery-pin", {
+    latInput: "#lat",
+    lngInput: "#lng",
+    searchInput: fieldMode ? "#line1" : undefined,
+    onChange: (loc) => fillAddress(loc.address),        // address found at the pin
+    onSelect: (s) => fillAddress(s.address),            // address of the chosen suggestion
+  });
+
+  document.getElementById("addr").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const out = document.getElementById("out");
+    const loc = picker.getValue();
+    if (!loc) return (out.textContent = "Place the pin first");
+    if (loc.in_service_area === false) return (out.textContent = "We don't deliver to this location yet");
+    const data = Object.fromEntries(new FormData(e.target));
+    data.location = loc;                     // lat, lng, source, display, address, accuracy_m ...
+    out.textContent = JSON.stringify(data, null, 2);
+  });
+</script>
+</body>
+</html>

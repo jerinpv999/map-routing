@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Track Order</title>
+<!--
+  Map-only order tracking for websites (iframe) and mobile apps (WebView).
+  Shows the route and the rider moving live. No coordinates, forms or panels.
+
+    /track.html?order=ORD-1001            map only
+    &eta=1                                small ETA card at the bottom
+    &follow=0                             don't keep the rider centred
+
+  Updates arrive over a WebSocket; never reload the page. Each update is also sent to
+  the host app as {type:"dr:update", state} (iframe parent, Flutter "DrBridge",
+  Android "DrAndroid", iOS "drBridge", React Native), so the app can show its own ETA.
+-->
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
+<script src="config.js"></script>
+<script src="map-style.js"></script>
+<script src="live.js"></script>
+<style>
+  :root { --ink:#1f1d1a; --muted:#6e675d; --line:#e4ded3; --panel:#fffdf9; --err:#c0392b; }
+  html, body { margin:0; height:100%; background:#f4f1ea; font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); }
+  #map { position:fixed; inset:0; }
+  .maplibregl-ctrl-attrib { font-size:10px; }
+
+  #dr-live-card { display:none; }
+  .live #dr-live-card { display:block; position:fixed; left:12px; right:12px; bottom:20px; max-width:360px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 14px;
+    box-shadow:0 6px 20px rgba(40,30,10,.14); }
+  .live.no-card #dr-live-card { display:none; }
+  .dr-status { display:flex; align-items:center; gap:8px; font-weight:600; }
+  .dr-status i { width:9px; height:9px; border-radius:50%; }
+  .dr-eta { display:flex; align-items:baseline; gap:10px; margin-top:4px; }
+  .dr-eta b { font-size:21px; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .dr-eta span, .dr-sub { color:var(--muted); font-size:12.5px; }
+  .dr-sub { display:none; }                       /* no order / rider IDs on the customer view */
+  .dr-stale { color:var(--err); }
+
+  #dr-recenter { position:fixed; right:12px; top:12px; padding:8px 12px; border-radius:20px; border:1px solid var(--line);
+    background:var(--panel); color:var(--ink); font:600 12.5px system-ui; box-shadow:0 3px 10px rgba(0,0,0,.15); cursor:pointer; }
+  .dr-rider { width:34px; height:34px; position:relative; }
+  .dr-rider-arrow { position:absolute; inset:0; filter:drop-shadow(0 2px 3px rgba(0,0,0,.3)); }
+  .dr-rider-halo { position:absolute; inset:-10px; border-radius:50%; background:rgba(59,111,216,.22); animation:drpulse 2s ease-out infinite; }
+  @keyframes drpulse { from { transform:scale(.6); opacity:1; } to { transform:scale(1.5); opacity:0; } }
+  @media (prefers-reduced-motion: reduce) { .dr-rider-halo { animation:none; } }
+  #msg { position:fixed; inset:0; display:grid; place-items:center; color:var(--muted); font-size:15px; text-align:center; padding:20px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="dr-live-card"></div>
+<button id="dr-recenter" hidden>Re-center</button>
+<div id="msg" hidden></div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const order = q.get("order");
+  if (!order) {
+    document.getElementById("msg").hidden = false;
+    document.getElementById("msg").textContent = "Missing ?order= in the link";
+  } else {
+    const CFG = window.DR_CONFIG;
+    maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
+    const map = new maplibregl.Map({
+      container: "map", style: drMapStyle(CFG.tilesUrl, CFG.glyphs),
+      center: CFG.center, zoom: CFG.zoom, maxPitch: 0, dragRotate: false,
+      attributionControl: { compact: true },
+    });
+    map.touchZoomRotate.disableRotation();
+    drAddressLabels(map, CFG.apiUrl);
+    map.once("style.load", () => drLive.start(map, order, { card: q.get("eta") === "1", follow: q.get("follow") !== "0" }));
+  }
+</script>
+</body>
+</html>

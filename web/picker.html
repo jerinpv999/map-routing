@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Pick Location</title>
+<!--
+  Full-screen location picker for mobile apps (WebView) and iframes.
+
+    /picker.html                         start at the phone's location (asks permission)
+    /picker.html?lat=9.98&lng=76.29      start at a saved location
+    &label=Deliver%20here                confirm button text
+    &coords=1                            show the numbers to the customer
+
+  On "Confirm" it sends {type:"dr:location", lat, lng, ...} to the host app:
+    iframe parent     window.addEventListener("message", e => e.data.type === "dr:location")
+    Flutter           JavaScriptChannel "DrBridge"
+    Android           addJavascriptInterface(obj, "DrAndroid")  -> obj.postMessage(String json)
+    iOS (WKWebView)   userContentController.add(handler, name: "drBridge")
+    React Native      <WebView onMessage={...}>
+  Every pin move is also sent as {type:"dr:location-change", ...}.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #f4f1ea; }
+  #picker { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="picker"></div>
+<script src="picker.js"></script>
+<script>
+  const q = new URLSearchParams(location.search);
+  const lat = parseFloat(q.get("lat")), lng = parseFloat(q.get("lng"));
+  DRPicker.mount("#picker", {
+    initial: isFinite(lat) && isFinite(lng) ? { lat, lng } : null,
+    showCoordinates: q.get("coords") === "1",
+    confirmButton: true,
+    text: q.get("label") ? { confirm: q.get("label") } : {},
+    onChange: (loc) => DRPicker.sendToApp(Object.assign({ type: "dr:location-change" }, loc)),
+    onConfirm: (loc) => DRPicker.sendToApp(Object.assign({ type: "dr:location" }, loc)),
+  });
+</script>
+</body>
+</html>
